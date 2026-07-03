@@ -1,0 +1,405 @@
+Part 1: .NET Core Web API (Backend)
+Step 1 — Entity (keep it clean, no annotations here)
+csharppublic class Employee
+{
+    public int Id { get; set; }
+    public string Name { get; set; }
+    public string Department { get; set; }
+    public decimal Salary { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+Step 2 — DTOs (separate contract from entity)
+csharppublic class EmployeeDto
+{
+    public int Id { get; set; }
+    public string Name { get; set; }
+    public string Department { get; set; }
+    public decimal Salary { get; set; }
+}
+
+public class CreateEmployeeDto
+{
+    [Required, MaxLength(100)]
+    public string Name { get; set; }
+
+    [Required, MaxLength(50)]
+    public string Department { get; set; }
+
+    [Range(0, 10000000)]
+    public decimal Salary { get; set; }
+}
+
+public class UpdateEmployeeDto : CreateEmployeeDto
+{
+    public int Id { get; set; }
+}
+Step 3 — AutoMapper profile
+csharppublic class EmployeeProfile : Profile
+{
+    public EmployeeProfile()
+    {
+        CreateMap<Employee, EmployeeDto>();
+        CreateMap<CreateEmployeeDto, Employee>();
+        CreateMap<UpdateEmployeeDto, Employee>();
+    }
+}
+Step 4 — Result wrapper (matches your { success, data } envelope convention)
+csharppublic class ApiResponse<T>
+{
+    public bool Success { get; set; }
+    public T Data { get; set; }
+    public string Message { get; set; }
+
+    public static ApiResponse<T> Ok(T data) => new() { Success = true, Data = data };
+    public static ApiResponse<T> Fail(string message) => new() { Success = false, Message = message };
+}
+Step 5 — Service interface + implementation
+csharppublic interface IEmployeeService
+{
+    Task<PagedResult<EmployeeDto>> GetAllAsync(int page, int pageSize);
+    Task<EmployeeDto?> GetByIdAsync(int id);
+    Task<EmployeeDto> CreateAsync(CreateEmployeeDto dto);
+    Task<bool> UpdateAsync(int id, UpdateEmployeeDto dto);
+    Task<bool> DeleteAsync(int id);
+}
+
+public class PagedResult<T>
+{
+    public List<T> Items { get; set; } = new();
+    public int TotalCount { get; set; }
+    public int Page { get; set; }
+    public int PageSize { get; set; }
+}
+
+public class EmployeeService : IEmployeeService
+{
+    private readonly AppDbContext _context;
+    private readonly IMapper _mapper;
+    private readonly ILogger<EmployeeService> _logger;
+
+    public EmployeeService(AppDbContext context, IMapper mapper, ILogger<EmployeeService> logger)
+    {
+        _context = context;
+        _mapper = mapper;
+        _logger = logger;
+    }
+
+    public async Task<PagedResult<EmployeeDto>> GetAllAsync(int page, int pageSize)
+    {
+        var query = _context.Employees.AsNoTracking().OrderByDescending(e => e.CreatedAt);
+
+        var totalCount = await query.CountAsync();
+        var items = await query
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .ToListAsync();
+
+        return new PagedResult<EmployeeDto>
+        {
+            Items = _mapper.Map<List<EmployeeDto>>(items),
+            TotalCount = totalCount,
+            Page = page,
+            PageSize = pageSize
+        };
+    }
+
+    public async Task<EmployeeDto?> GetByIdAsync(int id)
+    {
+        var employee = await _context.Employees.AsNoTracking()
+            .FirstOrDefaultAsync(e => e.Id == id);
+        return employee == null ? null : _mapper.Map<EmployeeDto>(employee);
+    }
+
+    public async Task<EmployeeDto> CreateAsync(CreateEmployeeDto dto)
+    {
+        using var transaction = await _context.Database.BeginTransactionAsync();
+        try
+        {
+            var employee = _mapper.Map<Employee>(dto);
+            _context.Employees.Add(employee);
+            await _context.SaveChangesAsync();
+
+            await transaction.CommitAsync();
+            _logger.LogInformation("Employee {Id} created", employee.Id);
+
+            return _mapper.Map<EmployeeDto>(employee);
+        }
+        catch
+        {
+            await transaction.RollbackAsync();
+            throw;
+        }
+    }
+
+    public async Task<bool> UpdateAsync(int id, UpdateEmployeeDto dto)
+    {
+        var employee = await _context.Employees.FindAsync(id);
+        if (employee == null) return false;
+
+        _mapper.Map(dto, employee);
+        await _context.SaveChangesAsync();
+        return true;
+    }
+
+    public async Task<bool> DeleteAsync(int id)
+    {
+        var employee = await _context.Employees.FindAsync(id);
+        if (employee == null) return false;
+
+        _context.Employees.Remove(employee);
+        await _context.SaveChangesAsync();
+        return true;
+    }
+}
+Step 6 — Controller (thin, just orchestration)
+csharp[ApiController]
+[Route("api/[controller]")]
+public class EmployeesController : ControllerBase
+{
+    private readonly IEmployeeService _employeeService;
+
+    public EmployeesController(IEmployeeService employeeService) => _employeeService = employeeService;
+
+    [HttpGet]
+    public async Task<IActionResult> GetAll([FromQuery] int page = 1, [FromQuery] int pageSize = 10)
+    {
+        var result = await _employeeService.GetAllAsync(page, pageSize);
+        return Ok(ApiResponse<PagedResult<EmployeeDto>>.Ok(result));
+    }
+
+    [HttpGet("{id}")]
+    public async Task<IActionResult> GetById(int id)
+    {
+        var employee = await _employeeService.GetByIdAsync(id);
+        if (employee == null) return NotFound(ApiResponse<EmployeeDto>.Fail("Employee not found"));
+        return Ok(ApiResponse<EmployeeDto>.Ok(employee));
+    }
+
+    [HttpPost]
+    public async Task<IActionResult> Create([FromBody] CreateEmployeeDto dto)
+    {
+        if (!ModelState.IsValid) return BadRequest(ModelState);
+
+        var created = await _employeeService.CreateAsync(dto);
+        return CreatedAtAction(nameof(GetById), new { id = created.Id }, ApiResponse<EmployeeDto>.Ok(created));
+    }
+
+    [HttpPut("{id}")]
+    public async Task<IActionResult> Update(int id, [FromBody] UpdateEmployeeDto dto)
+    {
+        if (id != dto.Id) return BadRequest(ApiResponse<object>.Fail("Id mismatch"));
+
+        var updated = await _employeeService.UpdateAsync(id, dto);
+        if (!updated) return NotFound(ApiResponse<object>.Fail("Employee not found"));
+        return NoContent();
+    }
+
+    [HttpDelete("{id}")]
+    public async Task<IActionResult> Delete(int id)
+    {
+        var deleted = await _employeeService.DeleteAsync(id);
+        if (!deleted) return NotFound(ApiResponse<object>.Fail("Employee not found"));
+        return NoContent();
+    }
+}
+Step 7 — Global exception handling middleware
+csharppublic class ExceptionMiddleware
+{
+    private readonly RequestDelegate _next;
+    private readonly ILogger<ExceptionMiddleware> _logger;
+
+    public ExceptionMiddleware(RequestDelegate next, ILogger<ExceptionMiddleware> logger)
+    {
+        _next = next;
+        _logger = logger;
+    }
+
+    public async Task InvokeAsync(HttpContext context)
+    {
+        try
+        {
+            await _next(context);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unhandled exception");
+            context.Response.ContentType = "application/json";
+            context.Response.StatusCode = 500;
+            await context.Response.WriteAsJsonAsync(ApiResponse<object>.Fail("An unexpected error occurred"));
+        }
+    }
+}
+Step 8 — Program.cs wiring
+csharpvar builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+
+builder.Services.AddAutoMapper(typeof(EmployeeProfile));
+builder.Services.AddScoped<IEmployeeService, EmployeeService>();
+builder.Services.AddControllers();
+
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowAngular", policy =>
+        policy.WithOrigins("http://localhost:4200").AllowAnyMethod().AllowAnyHeader());
+});
+
+var app = builder.Build();
+
+app.UseMiddleware<ExceptionMiddleware>();
+app.UseCors("AllowAngular");
+app.MapControllers();
+app.Run();
+
+Part 2: Angular (Standalone + Signals + Reactive Forms)
+Step 1 — Model
+typescriptexport interface Employee {
+  id?: number;
+  name: string;
+  department: string;
+  salary: number;
+}
+
+export interface ApiResponse<T> {
+  success: boolean;
+  data: T;
+  message?: string;
+}
+
+export interface PagedResult<T> {
+  items: T[];
+  totalCount: number;
+  page: number;
+  pageSize: number;
+}
+Step 2 — Service (signals-based state, matching your FinVentory pattern)
+typescript@Injectable({ providedIn: 'root' })
+export class EmployeeService {
+  private http = inject(HttpClient);
+  private apiUrl = 'https://localhost:5001/api/employees';
+
+  employees = signal<Employee[]>([]);
+  totalCount = signal<number>(0);
+  loading = signal<boolean>(false);
+
+  loadAll(page = 1, pageSize = 10) {
+    this.loading.set(true);
+    this.http.get<ApiResponse<PagedResult<Employee>>>(`${this.apiUrl}?page=${page}&pageSize=${pageSize}`)
+      .pipe(finalize(() => this.loading.set(false)))
+      .subscribe({
+        next: (res) => {
+          this.employees.set(res.data.items);
+          this.totalCount.set(res.data.totalCount);
+        },
+        error: (err) => console.error('Failed to load employees', err)
+      });
+  }
+
+  create(employee: Employee): Observable<ApiResponse<Employee>> {
+    return this.http.post<ApiResponse<Employee>>(this.apiUrl, employee);
+  }
+
+  update(id: number, employee: Employee): Observable<void> {
+    return this.http.put<void>(`${this.apiUrl}/${id}`, employee);
+  }
+
+  delete(id: number): Observable<void> {
+    return this.http.delete<void>(`${this.apiUrl}/${id}`);
+  }
+}
+Step 3 — Standalone component with Reactive Forms
+typescript@Component({
+  selector: 'app-employee-list',
+  standalone: true,
+  imports: [CommonModule, ReactiveFormsModule],
+  templateUrl: './employee-list.component.html'
+})
+export class EmployeeListComponent implements OnInit {
+  private fb = inject(FormBuilder);
+  employeeService = inject(EmployeeService);
+
+  editingId = signal<number | null>(null);
+
+  form = this.fb.group({
+    name: ['', [Validators.required, Validators.maxLength(100)]],
+    department: ['', Validators.required],
+    salary: [0, [Validators.required, Validators.min(0)]]
+  });
+
+  ngOnInit() {
+    this.employeeService.loadAll();
+  }
+
+  save() {
+    if (this.form.invalid) {
+      this.form.markAllAsTouched();
+      return;
+    }
+
+    const value = this.form.getRawValue() as Employee;
+    const id = this.editingId();
+
+    const request$ = id
+      ? this.employeeService.update(id, value)
+      : this.employeeService.create(value);
+
+    request$.subscribe({
+      next: () => {
+        this.resetForm();
+        this.employeeService.loadAll();
+      },
+      error: (err) => console.error('Save failed', err)
+    });
+  }
+
+  edit(emp: Employee) {
+    this.editingId.set(emp.id!);
+    this.form.patchValue(emp);
+  }
+
+  delete(id: number) {
+    this.employeeService.delete(id).subscribe(() => this.employeeService.loadAll());
+  }
+
+  resetForm() {
+    this.editingId.set(null);
+    this.form.reset({ name: '', department: '', salary: 0 });
+  }
+}
+Step 4 — Template
+html<form [formGroup]="form" (ngSubmit)="save()">
+  <input formControlName="name" placeholder="Name">
+  <div *ngIf="form.get('name')?.invalid && form.get('name')?.touched" class="error">
+    Name is required
+  </div>
+
+  <input formControlName="department" placeholder="Department">
+  <input formControlName="salary" type="number" placeholder="Salary">
+
+  <button type="submit">{{ editingId() ? 'Update' : 'Add' }}</button>
+</form>
+
+<div *ngIf="employeeService.loading()">Loading...</div>
+
+<table *ngIf="!employeeService.loading()">
+  <tr *ngFor="let emp of employeeService.employees()">
+    <td>{{ emp.name }}</td>
+    <td>{{ emp.department }}</td>
+    <td>{{ emp.salary }}</td>
+    <td>
+      <button (click)="edit(emp)">Edit</button>
+      <button (click)="delete(emp.id!)">Delete</button>
+    </td>
+  </tr>
+</table>
+
+Talking points this version unlocks in interview
+
+DTO separation → "prevents over-posting, decouples API contract from schema"
+Service layer + interface → "controller stays thin, business logic is testable in isolation, DI via IEmployeeService"
+Transaction wrapping on create → straight from your CashBankEntryService pattern — you can genuinely say "I use this in production for double-entry accounting flows"
+AutoMapper → common follow-up: "why not just map manually?" — answer: reduces boilerplate, but you'd avoid it for complex nested mappings where explicit control matters more
+Global exception middleware → "single place to log and shape error responses, no scattered try/catch in every controller"
+Signals over BehaviorSubject/manual subscribe → this is your strongest card — you can speak to it from actual FinVentory work, not just theory
+Pagination → "raw ToListAsync() doesn't scale past a few hundred rows"
