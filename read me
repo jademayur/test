@@ -1,0 +1,199 @@
+Part 1: .NET Core Web API (Backend)
+Step 1 — Create the project & install packages
+
+bash
+dotnet new webapi -n EmployeeApi
+cd EmployeeApi
+dotnet add package Microsoft.EntityFrameworkCore.SqlServer
+dotnet add package Microsoft.EntityFrameworkCore.Tools
+Step 2 — Define the Model
+
+csharp
+public class Employee
+{
+    public int Id { get; set; }
+    public string Name { get; set; }
+    public string Department { get; set; }
+    public decimal Salary { get; set; }
+}
+Step 3 — Create the DbContext
+
+csharp
+public class AppDbContext : DbContext
+{
+    public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
+    public DbSet<Employee> Employees { get; set; }
+}
+Step 4 — Register DbContext in Program.cs
+
+csharp
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+
+builder.Services.AddControllers();
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowAngular", policy =>
+        policy.WithOrigins("http://localhost:4200").AllowAnyMethod().AllowAnyHeader());
+});
+
+var app = builder.Build();
+app.UseCors("AllowAngular");
+app.MapControllers();
+app.Run();
+
+
+sTEP 5 
+[ApiController]
+[Route("api/[controller]")]
+public class EmployeesController : ControllerBase
+{
+    private readonly AppDbContext _context;
+    public EmployeesController(AppDbContext context) => _context = context;
+
+    // GET: api/employees
+    [HttpGet]
+    public async Task<IActionResult> GetAll()
+    {
+        var employees = await _context.Employees.ToListAsync();
+        return Ok(employees);
+    }
+
+    // GET: api/employees/5
+    [HttpGet("{id}")]
+    public async Task<IActionResult> GetById(int id)
+    {
+        var employee = await _context.Employees.FindAsync(id);
+        if (employee == null) return NotFound();
+        return Ok(employee);
+    }
+
+    // POST: api/employees
+    [HttpPost]
+    public async Task<IActionResult> Create(Employee employee)
+    {
+        _context.Employees.Add(employee);
+        await _context.SaveChangesAsync();
+        return CreatedAtAction(nameof(GetById), new { id = employee.Id }, employee);
+    }
+
+    // PUT: api/employees/5
+    [HttpPut("{id}")]
+    public async Task<IActionResult> Update(int id, Employee employee)
+    {
+        if (id != employee.Id) return BadRequest();
+        _context.Entry(employee).State = EntityState.Modified;
+        await _context.SaveChangesAsync();
+        return NoContent();
+    }
+
+    // DELETE: api/employees/5
+    [HttpDelete("{id}")]
+    public async Task<IActionResult> Delete(int id)
+    {
+        var employee = await _context.Employees.FindAsync(id);
+        if (employee == null) return NotFound();
+        _context.Employees.Remove(employee);
+        await _context.SaveChangesAsync();
+        return NoContent();
+    }
+}
+
+--------------------------
+Angular part
+--------------------------
+Step 2 — Define the model
+typescriptexport interface Employee {
+  id?: number;
+  name: string;
+  department: string;
+  salary: number;
+}
+
+Build servcie step 3
+------------------------------
+@Injectable({ providedIn: 'root' })
+export class EmployeeService {
+  private apiUrl = 'https://localhost:5001/api/employees';
+  constructor(private http: HttpClient) {}
+
+  getAll(): Observable<Employee[]> {
+    return this.http.get<Employee[]>(this.apiUrl);
+  }
+  getById(id: number): Observable<Employee> {
+    return this.http.get<Employee>(`${this.apiUrl}/${id}`);
+  }
+  create(employee: Employee): Observable<Employee> {
+    return this.http.post<Employee>(this.apiUrl, employee);
+  }
+  update(id: number, employee: Employee): Observable<void> {
+    return this.http.put<void>(`${this.apiUrl}/${id}`, employee);
+  }
+  delete(id: number): Observable<void> {
+    return this.http.delete<void>(`${this.apiUrl}/${id}`);
+  }
+}
+
+Step 4
+------------------------------
+export class EmployeeListComponent implements OnInit {
+  employees: Employee[] = [];
+  form: Employee = { name: '', department: '', salary: 0 };
+  editingId: number | null = null;
+
+  constructor(private employeeService: EmployeeService) {}
+
+  ngOnInit() { this.loadEmployees(); }
+
+  loadEmployees() {
+    this.employeeService.getAll().subscribe(data => this.employees = data);
+  }
+
+  save() {
+    if (this.editingId) {
+      this.employeeService.update(this.editingId, this.form).subscribe(() => {
+        this.editingId = null;
+        this.resetForm();
+        this.loadEmployees();
+      });
+    } else {
+      this.employeeService.create(this.form).subscribe(() => {
+        this.resetForm();
+        this.loadEmployees();
+      });
+    }
+  }
+
+  edit(emp: Employee) {
+    this.form = { ...emp };
+    this.editingId = emp.id!;
+  }
+
+  delete(id: number) {
+    this.employeeService.delete(id).subscribe(() => this.loadEmployees());
+  }
+
+  resetForm() {
+    this.form = { name: '', department: '', salary: 0 };
+  }
+}
+
+step 5 tempate 
+<input [(ngModel)]="form.name" placeholder="Name">
+<input [(ngModel)]="form.department" placeholder="Department">
+<input [(ngModel)]="form.salary" type="number" placeholder="Salary">
+<button (click)="save()">{{ editingId ? 'Update' : 'Add' }}</button>
+
+<table>
+  <tr *ngFor="let emp of employees">
+    <td>{{ emp.name }}</td>
+    <td>{{ emp.department }}</td>
+    <td>{{ emp.salary }}</td>
+    <td>
+      <button (click)="edit(emp)">Edit</button>
+      <button (click)="delete(emp.id!)">Delete</button>
+    </td>
+  </tr>
+</table>
+
+
